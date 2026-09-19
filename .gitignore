@@ -45,6 +45,7 @@ ehthumbs.db
 Desktop.ini
 
 # Application data
+context/
 data/trips.json
 data/*.json
 
