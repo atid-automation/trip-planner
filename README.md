@@ -1,271 +1,95 @@
-# Trip Planner MVP (Version 1)
+# 🧳 Trip Planner - Automation Lab (AUT)
 
-A small, simple Trip Planner web application built as the foundation for a Test Automation Engineering training course.
+Welcome to the **Trip Planner** project! This application serves as the primary **Application Under Test (AUT)** for our **Test Automation Engineering** training course. 
 
-## Application Description
+Designed to mimic real-world software evolution, this project starts as a simple Minimum Viable Product (MVP) and gradually incorporates new capabilities, architecture changes, and realistic QA challenges across course modules.
 
-The Trip Planner allows users to create and manage travel itineraries. Each itinerary (trip) contains a name, destination, date range, and a set of days, each of which can have multiple activities/attractions.
+---
 
-This is Version 1 — intentionally small, simple, and deterministic, designed for easy testing and future extension.
+## 📸 Application Preview
 
-## Architecture Overview
+<p align="center">
+  <img src="assets/trip-planner.png" alt="Trip Planner Application Preview" width="60%" />
+</p>
 
-```
-┌───────────────────────────────────────────┐
-│  Frontend (HTML + Vanilla JS + Tailwind)  │
-└───────────────────┬───────────────────────┘
-                    │  REST API (JSON)
-┌───────────────────▼───────────────────────┐
-│         FastAPI Backend (Python)          │
-│  ┌─────────────┐  ┌───────────────────┐   │
-│  │   Routes    │  │  Business Logic   │   │
-│  └──────┬──────┘  └────────┬──────────┘   │
-│         └────────┬─────────┘              │
-│         ┌────────▼─────────┐              │
-│         │ Persistence Layer│              │
-│         └────────┬─────────┘              │
-└──────────────────┼────────────────────────┘
-         ┌─────────▼─────────┐
-         │  JSON File Store  │
-         │   data/trips.json │
-         └───────────────────┘
-```
+---
 
-## Technology Stack
+## 🎯 Purpose of This Project
 
-### Backend
-- **Python 3.10+**
-- **FastAPI** — Web framework for REST API
-- **Pydantic** — Data validation
-- **Uvicorn** — ASGI server
+During this course, you will use this application to practice hands-on test planning, designing, and writing automated test suites using modern LLM tools, framework patterns, and automation techniques.
 
-### Frontend
-- **HTML5** — Markup
-- **Vanilla JavaScript (ES6+)** — UI logic (no frameworks)
-- **Tailwind CSS** (via CDN) — Styling
-- **REST API** — Communication with backend
+Key topics covered throughout the project lifecycle include:
+- **UI & DOM Automation** (Locators, dynamic UI states, form validation)
+- **REST API Testing** (Endpoints, HTTP status codes, payloads, error handling)
+- **Authentication & Session Handling**
+- **Mobile & Responsive Layout Testing**
+- **Database Persistence & State Verification**
+- **Performance & Load Testing**
 
-### Data Persistence
-- **JSON file** (`data/trips.json`) — No database in Version 1
+---
 
-## Prerequisites
+## 🗺️ Project Evolution (Version Roadmap)
 
-- Python 3.10 or higher
-- pip (Python package installer)
-- A modern web browser
+The application evolves through 6 distinct versions during the course:
 
-## Installation
+| Version | Feature / Module Focus | Tech Stack Highlights |
+| :--- | :--- | :--- |
+| **`v1.0`** | **Trip Planner MVP** (Itinerary CRUD, days, activities) | HTML, Vanilla JS, Tailwind CSS, Python (FastAPI), JSON persistence |
+| **`v2.0`** | **User Authentication** | Registration, Login, Session/JWT handling |
+| **`v3.0`** | **Budget & Expenses** | Cost tracking, trip financial summary |
+| **`v4.0`** | **Travel Journal** | Travel notes, logs, diary entries |
+| **`v5.0`** | **Mobile Optimization** | Responsive views, mobile-friendly UI automation |
+| **`v6.0`** | **Database Migration & Performance** | SQLite persistence, high-load & stress scenario |
 
-1. Navigate to the backend directory:
+---
 
+## 📦 How to Access Course Versions
+
+Each version of the application corresponds to a specific stage in the course.
+
+To download the source code for a specific version:
+1. Navigate to the [**Releases**](https://github.com/YOUR_USERNAME/trip-planner/releases) tab on the right side of this repository.
+2. Select the release version assigned in your current module (e.g., `v1.0`, `v2.0`).
+3. Download the **Source code (zip)** file under **Assets**.
+4. Extract the zip file locally on your machine and follow the instructions inside that version's specific `README.md`.
+
+---
+
+## 🚀 Quick Start (General Setup)
+
+Each version comes with its own isolated environment requirements. The general steps to run any version locally are:
+
+### Prerequisites
+- **Python 3.10+** installed on your system.
+- A modern web browser (Chrome, Firefox, or Edge).
+
+### Running the Application Locally
+1. **Navigate to the project root directory**:
 ```bash
-cd backend
+   cd trip-planner
 ```
-
-2. Create a virtual environment (recommended):
-
+2. **Create and activate a virtual environment**:
+   - On Windows:
+```cmd
+     python -m venv venv
+     venv\Scripts\activate
+```
+   - On macOS/Linux:
 ```bash
-# Windows
-python -m venv .venv
-.venv\Scripts\activate
-
-# macOS / Linux
-python3 -m venv .venv
-source .venv/bin/activate
+     python3 -m venv venv
+     source venv/bin/activate
 ```
-
-3. Install dependencies:
-
+3. **Install dependencies**:
 ```bash
-pip install -r requirements.txt
+   pip install -r requirements.txt
 ```
-
-## How to Run the Backend
-
-From the `backend` directory (with virtual environment activated):
-
+4. **Start the backend server**:
 ```bash
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+    cd backend
+    uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
+5. **Open the application**:
+   Open your browser and navigate to `http://localhost:8000`.
 
-The backend will start on:
-- **API**: `http://localhost:8000/api/`
-- **Frontend**: `http://localhost:8000/`
-- **API Docs (Swagger UI)**: `http://localhost:8000/docs`
-- **OpenAPI JSON**: `http://localhost:8000/openapi.json`
-- **Health check**: `http://localhost:8000/api/health`
+---
 
-The `--reload` flag enables hot-reloading during development.
-
-## How to Run the Frontend
-
-The frontend is served automatically by the FastAPI backend at `http://localhost:8000/`. There is no separate frontend server required.
-
-On first run, seed data is automatically created in `data/trips.json`.
-
-## API Overview
-
-### Trips
-
-| Method | Endpoint                 | Description              |
-|--------|--------------------------|--------------------------|
-| GET    | `/api/trips`             | List all trips           |
-| POST   | `/api/trips`             | Create a new trip        |
-| GET    | `/api/trips/{trip_id}`   | Get trip details         |
-| PUT    | `/api/trips/{trip_id}`   | Update a trip            |
-| DELETE | `/api/trips/{trip_id}`   | Delete a trip            |
-
-### Trip Days
-
-| Method | Endpoint                                      | Description                |
-|--------|-----------------------------------------------|----------------------------|
-| GET    | `/api/trips/{trip_id}/days`                   | List days for a trip       |
-| POST   | `/api/trips/{trip_id}/days`                   | Add a day to a trip        |
-| GET    | `/api/trips/{trip_id}/days/{day_id}`          | Get day details            |
-| PUT    | `/api/trips/{trip_id}/days/{day_id}`          | Update a day               |
-| DELETE | `/api/trips/{trip_id}/days/{day_id}`          | Delete a day               |
-
-### Activities
-
-| Method | Endpoint                                                                    | Description                   |
-|--------|-----------------------------------------------------------------------------|-------------------------------|
-| GET    | `/api/trips/{trip_id}/days/{day_id}/activities`                            | List activities for a day     |
-| POST   | `/api/trips/{trip_id}/days/{day_id}/activities`                            | Add an activity to a day      |
-| GET    | `/api/trips/{trip_id}/days/{day_id}/activities/{activity_id}`              | Get activity details          |
-| PUT    | `/api/trips/{trip_id}/days/{day_id}/activities/{activity_id}`              | Update an activity           |
-| DELETE | `/api/trips/{trip_id}/days/{day_id}/activities/{activity_id}`              | Delete an activity           |
-
-### System
-
-| Method | Endpoint               | Description                    |
-|--------|------------------------|--------------------------------|
-| POST   | `/api/system/reset`    | Reset all data to seed state   |
-| GET    | `/api/health`          | Health check endpoint          |
-
-### HTTP Status Codes
-
-- **200 OK** — Successful retrieval or update
-- **201 Created** — Successful creation
-- **204 No Content** — Successful deletion
-- **400 Bad Request** — Invalid input or validation error
-- **404 Not Found** — Requested entity does not exist
-
-Error responses use the format:
-
-```json
-{
-    "detail": "Trip not found"
-}
-```
-
-## Data Storage Explanation
-
-All data is stored in a single JSON file at `data/trips.json` (relative to the project root).
-
-The persistence layer (`backend/app/data/trip_store.py`) abstracts all read/write operations. The API routes and business logic never access the JSON file directly.
-
-This design is intentional: a future version will replace the JSON store with SQLite by updating only the persistence layer, with no changes needed to the API routes or business logic.
-
-**Data Model:**
-
-```json
-{
-  "id": "trip-1",
-  "name": "Vietnam Adventure",
-  "destination": "Vietnam",
-  "start_date": "2026-10-01",
-  "end_date": "2026-10-10",
-  "days": [
-    {
-      "id": "day-1-1",
-      "date": "2026-10-01",
-      "title": "Arrival in Hanoi",
-      "activities": [
-        {
-          "id": "act-1-1-1",
-          "name": "Arrive in Hanoi",
-          "location": "Noi Bai Airport",
-          "description": "..."
-        }
-      ]
-    }
-  ]
-}
-```
-
-## Project Structure
-
-```
-trip-planner-v1/
-├── backend/
-│   ├── main.py                      # FastAPI app entry point
-│   ├── requirements.txt             # Python dependencies
-│   └── app/
-│       ├── models/
-│       │   └── schemas.py           # Pydantic models (Trip, Day, Activity)
-│       ├── services/
-│       │   └── trip_service.py      # Business logic / service layer
-│       ├── data/
-│       │   ├── trip_store.py        # Persistence layer (JSON file)
-│       │   └── seed_data.py         # Initial seed data
-│       └── routers/
-│           ├── trips.py             # Trip CRUD endpoints
-│           ├── days.py              # Day CRUD endpoints
-│           ├── activities.py        # Activity CRUD endpoints
-│           └── system.py            # System/reset endpoints
-├── frontend/
-│   ├── index.html                   # Main HTML page (all views)
-│   └── app.js                       # Frontend UI logic (Vanilla JS)
-├── data/
-│   └── trips.json                   # Data file (created automatically)
-└── context/
-    └── Prompt 1 - ... .md           # Original specification
-```
-
-## How to Reset Seed Data
-
-There are two ways to reset the application to its initial state:
-
-### Option 1: Via the UI
-Click the **Reset Data** button in the top-right header of the application.
-
-### Option 2: Via the API
-```bash
-curl -X POST http://localhost:8000/api/system/reset
-```
-
-Both methods will restore the 3 sample trips and overwrite any changes.
-
-## Validation Rules
-
-The application enforces the following validation rules (both client-side and server-side):
-
-- **Trip name**: Required, cannot be empty
-- **Destination**: Required, cannot be empty
-- **Start date**: Required
-- **End date**: Required, cannot be earlier than start date
-- **Day date**: Required
-- **Activity name**: Required, cannot be empty
-
-## Automation-Friendly Design
-
-The application is designed for automated testing:
-
-- Stable HTML structure with semantic elements
-- `data-testid` attributes on key interactive elements (buttons, forms, inputs)
-- Predictable REST API with consistent JSON responses
-- Deterministic seed data (no randomization)
-- No unnecessary animations or timing-dependent behavior
-- IDs use a readable prefix pattern (`trip-*`, `day-*`, `act-*`)
-
-## Future Versions
-
-This application will evolve in future versions to add:
-- User Registration and Login
-- Travel costs and budget management
-- Travel journal
-- Mobile/responsive support
-- SQLite database persistence
-- Additional QA/testing scenarios
-
-The architecture is designed to support these additions with minimal changes to existing code.
