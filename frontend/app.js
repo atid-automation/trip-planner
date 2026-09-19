@@ -1,0 +1,1566 @@
+const API_BASE = window.location.origin.includes('localhost') && !window.location.pathname.startsWith('/static')
+    ? ''
+    : (window.location.origin);
+
+const TOKEN_KEY = 'trip_planner_token';
+const USER_KEY = 'trip_planner_user';
+
+const SUPPORTED_CURRENCIES = ['USD', 'EUR', 'GBP', 'ILS', 'VND', 'THB', 'JPY'];
+const EXPENSE_CATEGORIES = ['Accommodation', 'Food', 'Transportation', 'Activities', 'Shopping', 'Other'];
+
+let authToken = localStorage.getItem(TOKEN_KEY) || null;
+let currentUserData = null;
+try {
+    const saved = localStorage.getItem(USER_KEY);
+    if (saved) currentUserData = JSON.parse(saved);
+} catch (e) { currentUserData = null; }
+
+let currentView = 'login';
+let currentTripId = null;
+let editingTripId = null;
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+function setAuth(token, user) {
+    authToken = token;
+    currentUserData = user;
+    if (token) {
+        localStorage.setItem(TOKEN_KEY, token);
+    } else {
+        localStorage.removeItem(TOKEN_KEY);
+    }
+    if (user) {
+        localStorage.setItem(USER_KEY, JSON.stringify(user));
+    } else {
+        localStorage.removeItem(USER_KEY);
+    }
+    updateHeader();
+}
+
+function clearAuth() {
+    setAuth(null, null);
+}
+
+function isAuthenticated() {
+    return !!authToken;
+}
+
+function updateHeader() {
+    const userInfo = $('#user-info');
+    const authLinks = $('#auth-links');
+    if (isAuthenticated() && currentUserData) {
+        userInfo.classList.remove('hidden');
+        userInfo.classList.add('flex');
+        authLinks.classList.add('hidden');
+        authLinks.classList.remove('flex');
+        $('#current-user-display').textContent = currentUserData.full_name || currentUserData.email;
+    } else {
+        userInfo.classList.add('hidden');
+        userInfo.classList.remove('flex');
+        authLinks.classList.remove('hidden');
+        authLinks.classList.add('flex');
+    }
+}
+
+function showView(viewName) {
+    if (['trips-list', 'trip-form', 'trip-details'].includes(viewName) && !isAuthenticated()) {
+        viewName = 'login';
+    }
+    currentView = viewName;
+    $$('.view').forEach(v => v.classList.add('hidden'));
+    const target = $('#view-' + viewName);
+    if (target) {
+        target.classList.remove('hidden');
+    }
+}
+
+function showToast(message, type = 'info') {
+    const container = $('#toast-container');
+    const toast = document.createElement('div');
+    const colors = {
+        success: 'bg-green-600 border-green-700',
+        error: 'bg-red-600 border-red-700',
+        info: 'bg-slate-700 border-slate-800',
+        warning: 'bg-amber-600 border-amber-700'
+    };
+    toast.className = `toast px-4 py-3 rounded-lg shadow-lg text-white text-sm flex items-center gap-2 border ${colors[type] || colors.info} min-w-[260px]`;
+    const icons = {
+        success: '✓',
+        error: '✕',
+        info: 'ℹ',
+        warning: '!'
+    };
+    toast.innerHTML = `<span class="font-bold">${icons[type] || icons.info}</span><span>${escapeHtml(message)}</span>`;
+    container.appendChild(toast);
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(120%)';
+        toast.style.transition = 'all 0.3s ease';
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
+function escapeHtml(text) {
+    if (text == null) return '';
+    const div = document.createElement('div');
+    div.textContent = String(text);
+    return div.innerHTML;
+}
+
+function extractErrorMessage(err) {
+    if (err == null) return 'An unknown error occurred';
+    if (typeof err === 'string') return err;
+    if (err instanceof Error) {
+        const msg = err.message;
+        if (msg && typeof msg === 'string' && msg.length > 0) return msg;
+        const name = err.name && err.name !== 'Error' ? err.name : '';
+        return name ? `${name} occurred` : 'An error occurred';
+    }
+    if (Array.isArray(err)) {
+        if (err.length === 0) return 'Validation error';
+        const parts = err.map(item => {
+            if (item && typeof item === 'object') {
+                let field = '';
+                if (Array.isArray(item.loc) && item.loc.length > 0) {
+                    field = item.loc.slice(item.loc[0] === 'body' ? 1 : 0).join('.');
+                }
+                const reason = item.msg || (typeof item.message === 'string' ? item.message : '');
+                if (field && reason) return `${field}: ${reason}`;
+                if (reason) return reason;
+                if (field) return `Invalid value for ${field}`;
+            }
+            return extractErrorMessage(item);
+        }).filter(s => typeof s === 'string' && s.length > 0);
+        if (parts.length === 1) return parts[0];
+        if (parts.length > 1) return parts.join('; ');
+        return 'Validation error';
+    }
+    if (typeof err === 'object') {
+        for (const key of ['detail', 'message', 'msg', 'error', 'error_message']) {
+            if (Object.prototype.hasOwnProperty.call(err, key) || key in err) {
+                const val = err[key];
+                if (val != null && (typeof val === 'string' || Array.isArray(val) || typeof val === 'object')) {
+                    const sub = extractErrorMessage(val);
+                    if (sub) return sub;
+                }
+            }
+        }
+        try {
+            const s = JSON.stringify(err);
+            if (s && s !== '{}') return s;
+        } catch (e) { /* ignore */ }
+        return 'An error occurred';
+    }
+    try { return String(err); } catch (e) { return 'An error occurred'; }
+}
+
+async function apiRequest(url, method = 'GET', body = null) {
+    const opts = {
+        method,
+        headers: { 'Content-Type': 'application/json' }
+    };
+    if (authToken) {
+        opts.headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    if (body != null) {
+        opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(API_BASE + url, opts);
+    if (res.status === 401) {
+        clearAuth();
+        renderLogin();
+        throw new Error('Session expired. Please log in again.');
+    }
+    let data = null;
+    const text = await res.text();
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = text; }
+    if (!res.ok) {
+        let msg;
+        if (data != null) {
+            const extracted = extractErrorMessage(data);
+            if (extracted && extracted !== 'An error occurred') {
+                msg = extracted;
+            } else if (typeof data === 'string' && data.length > 0) {
+                msg = data;
+            } else {
+                msg = `Request failed: ${res.status}`;
+            }
+        } else {
+            msg = `Request failed: ${res.status}`;
+        }
+        throw new Error(msg);
+    }
+    return { ok: true, status: res.status, data };
+}
+
+function formatDate(d) {
+    if (!d) return '';
+    const dt = new Date(d);
+    if (isNaN(dt)) return d;
+    return dt.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function formatCurrency(amount, currency) {
+    if (amount == null || isNaN(amount)) amount = 0;
+    try {
+        return new Intl.NumberFormat('en-US', {
+            style: 'currency',
+            currency: currency || 'USD',
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        }).format(Number(amount));
+    } catch (e) {
+        return `${currency || ''} ${Number(amount).toFixed(2)}`;
+    }
+}
+
+function daysBetween(start, end) {
+    if (!start || !end) return 0;
+    const a = new Date(start);
+    const b = new Date(end);
+    return Math.round((b - a) / (1000 * 60 * 60 * 24)) + 1;
+}
+
+function totalActivities(trip) {
+    return (trip.days || []).reduce((sum, d) => sum + (d.activities || []).length, 0);
+}
+
+function renderLogin() {
+    showView('login');
+    const container = $('#view-login');
+    container.innerHTML = `
+        <div class="max-w-md mx-auto">
+            <div class="bg-white rounded-xl border border-slate-200 p-8 shadow-sm">
+                <div class="text-center mb-8">
+                    <div class="w-16 h-16 bg-indigo-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                        <svg class="w-8 h-8 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    </div>
+                    <h2 class="text-2xl font-bold text-slate-800">Welcome Back</h2>
+                    <p class="text-slate-500 mt-1">Sign in to manage your trips</p>
+                </div>
+                <form id="login-form" data-testid="login-form" novalidate>
+                    <div class="space-y-5">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Email</label>
+                            <input type="email" id="login-email" name="email" data-testid="login-email" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" required placeholder="you@example.com">
+                            <div class="text-red-600 text-sm mt-1 hidden" id="login-err-email"></div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Password</label>
+                            <input type="password" id="login-password" name="password" data-testid="login-password" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" required placeholder="••••••••">
+                            <div class="text-red-600 text-sm mt-1 hidden" id="login-err-password"></div>
+                        </div>
+                    </div>
+                    <div class="text-sm text-red-600 mt-3 hidden" id="login-error-general" data-testid="login-error"></div>
+                    <div class="mt-8">
+                        <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-lg font-medium shadow-sm transition-colors" data-testid="login-submit">
+                            Sign In
+                        </button>
+                    </div>
+                </form>
+                <div class="mt-6 text-center text-sm text-slate-600">
+                    Don't have an account?
+                    <button id="link-to-register" class="text-indigo-600 hover:text-indigo-700 font-medium ml-1" data-testid="link-to-register">Create one</button>
+                </div>
+                <div class="mt-6 pt-6 border-t border-slate-100 text-xs text-slate-500">
+                    <p class="font-semibold mb-2 text-slate-600">Demo Accounts:</p>
+                    <p><span class="font-mono bg-slate-100 px-1.5 py-0.5 rounded">alice@example.com</span> / Password123!</p>
+                    <p class="mt-1"><span class="font-mono bg-slate-100 px-1.5 py-0.5 rounded">bob@example.com</span> / Password123!</p>
+                </div>
+            </div>
+        </div>
+    `;
+
+    $('#link-to-register', container).addEventListener('click', () => renderRegister());
+    const form = $('#login-form', container);
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        ['email', 'password'].forEach(f => {
+            const el = $(`#login-err-${f}`);
+            if (el) { el.classList.add('hidden'); el.textContent = ''; }
+        });
+        $('#login-error-general', container).classList.add('hidden');
+        $('#login-error-general', container).textContent = '';
+
+        const email = $('#login-email', container).value.trim();
+        const password = $('#login-password', container).value;
+        let hasError = false;
+        if (!email) { $('#login-err-email').textContent = 'Email is required'; $('#login-err-email').classList.remove('hidden'); hasError = true; }
+        if (!password) { $('#login-err-password').textContent = 'Password is required'; $('#login-err-password').classList.remove('hidden'); hasError = true; }
+        if (hasError) return;
+
+        try {
+            const { data } = await apiRequest('/api/auth/login', 'POST', { email, password });
+            setAuth(data.access_token, data.user);
+            showToast(`Welcome back, ${data.user.full_name}!`, 'success');
+            renderTripsList();
+        } catch (err) {
+            const msg = extractErrorMessage(err);
+            $('#login-error-general', container).textContent = msg;
+            $('#login-error-general', container).classList.remove('hidden');
+            showToast(msg, 'error');
+        }
+    });
+}
+
+function renderRegister() {
+    showView('register');
+    const container = $('#view-register');
+    container.innerHTML = `
+        <div class="max-w-md mx-auto">
+            <div class="bg-white rounded-xl border border-slate-200 p-8 shadow-sm">
+                <div class="text-center mb-8">
+                    <div class="w-16 h-16 bg-indigo-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                        <svg class="w-8 h-8 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"></path></svg>
+                    </div>
+                    <h2 class="text-2xl font-bold text-slate-800">Create Account</h2>
+                    <p class="text-slate-500 mt-1">Start planning your adventures</p>
+                </div>
+                <form id="register-form" data-testid="register-form" novalidate>
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Full Name <span class="text-red-500">*</span></label>
+                            <input type="text" id="reg-full-name" name="full_name" data-testid="register-fullname" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" required placeholder="Jane Doe">
+                            <div class="text-red-600 text-sm mt-1 hidden" id="reg-err-full_name"></div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Email <span class="text-red-500">*</span></label>
+                            <input type="email" id="reg-email" name="email" data-testid="register-email" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" required placeholder="you@example.com">
+                            <div class="text-red-600 text-sm mt-1 hidden" id="reg-err-email"></div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Password <span class="text-red-500">*</span></label>
+                            <input type="password" id="reg-password" name="password" data-testid="register-password" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" required placeholder="Min 6 characters">
+                            <div class="text-red-600 text-sm mt-1 hidden" id="reg-err-password"></div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Confirm Password <span class="text-red-500">*</span></label>
+                            <input type="password" id="reg-password-confirm" name="password_confirmation" data-testid="register-confirm-password" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" required placeholder="Repeat your password">
+                            <div class="text-red-600 text-sm mt-1 hidden" id="reg-err-password_confirmation"></div>
+                        </div>
+                    </div>
+                    <div class="text-sm text-red-600 mt-3 hidden" id="register-error-general" data-testid="register-error"></div>
+                    <div class="mt-8">
+                        <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-lg font-medium shadow-sm transition-colors" data-testid="register-submit">
+                            Create Account
+                        </button>
+                    </div>
+                </form>
+                <div class="mt-6 text-center text-sm text-slate-600">
+                    Already have an account?
+                    <button id="link-to-login" class="text-indigo-600 hover:text-indigo-700 font-medium ml-1" data-testid="link-to-login">Sign in</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    $('#link-to-login', container).addEventListener('click', () => renderLogin());
+    const form = $('#register-form', container);
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        ['full_name', 'email', 'password', 'password_confirmation'].forEach(f => {
+            const el = $(`#reg-err-${f}`);
+            if (el) { el.classList.add('hidden'); el.textContent = ''; }
+        });
+        $('#register-error-general', container).classList.add('hidden');
+        $('#register-error-general', container).textContent = '';
+
+        const full_name = $('#reg-full-name', container).value.trim();
+        const email = $('#reg-email', container).value.trim();
+        const password = $('#reg-password', container).value;
+        const password_confirmation = $('#reg-password-confirm', container).value;
+
+        let hasError = false;
+        if (!full_name) { $('#reg-err-full_name').textContent = 'Full name is required'; $('#reg-err-full_name').classList.remove('hidden'); hasError = true; }
+        if (!email) { $('#reg-err-email').textContent = 'Email is required'; $('#reg-err-email').classList.remove('hidden'); hasError = true; }
+        if (!password) { $('#reg-err-password').textContent = 'Password is required'; $('#reg-err-password').classList.remove('hidden'); hasError = true; }
+        else if (password.length < 6) { $('#reg-err-password').textContent = 'Password must be at least 6 characters'; $('#reg-err-password').classList.remove('hidden'); hasError = true; }
+        if (!password_confirmation) { $('#reg-err-password_confirmation').textContent = 'Please confirm your password'; $('#reg-err-password_confirmation').classList.remove('hidden'); hasError = true; }
+        if (password && password_confirmation && password !== password_confirmation) {
+            $('#reg-err-password_confirmation').textContent = 'Passwords do not match';
+            $('#reg-err-password_confirmation').classList.remove('hidden');
+            hasError = true;
+        }
+        if (hasError) return;
+
+        try {
+            await apiRequest('/api/auth/register', 'POST', { full_name, email, password, password_confirmation });
+            showToast('Account created successfully. Please sign in.', 'success');
+            renderLogin();
+            $('#login-email').value = email;
+        } catch (err) {
+            const msg = extractErrorMessage(err);
+            $('#register-error-general', container).textContent = msg;
+            $('#register-error-general', container).classList.remove('hidden');
+            showToast(msg, 'error');
+        }
+    });
+}
+
+async function renderTripsList() {
+    if (!isAuthenticated()) { renderLogin(); return; }
+    showView('trips-list');
+    const container = $('#view-trips-list');
+    container.innerHTML = `
+        <div class="mb-8 flex items-center justify-between">
+            <div>
+                <h2 class="text-2xl font-bold text-slate-800">My Trips</h2>
+                <p class="text-slate-500 mt-1" id="trips-subtitle">Loading...</p>
+            </div>
+            <button id="btn-create-trip" data-testid="create-trip-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-lg font-medium shadow-sm transition-colors flex items-center gap-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                Create Trip
+            </button>
+        </div>
+        <div id="trips-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5"></div>
+    `;
+
+    $('#btn-create-trip').addEventListener('click', () => openTripForm());
+    $('#brand-link').addEventListener('click', () => { if (isAuthenticated()) renderTripsList(); else renderLogin(); });
+
+    try {
+        const { data: trips } = await apiRequest('/api/trips');
+        const grid = $('#trips-grid');
+        $('#trips-subtitle').textContent = `${trips.length} trip${trips.length === 1 ? '' : 's'} planned`;
+
+        if (trips.length === 0) {
+            grid.innerHTML = `
+                <div class="col-span-full bg-white rounded-xl border-2 border-dashed border-slate-200 p-12 text-center">
+                    <div class="mx-auto w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
+                        <svg class="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    </div>
+                    <h3 class="text-lg font-semibold text-slate-700 mb-1">No trips yet</h3>
+                    <p class="text-slate-500 mb-5">Create your first trip to get started planning adventures.</p>
+                </div>
+            `;
+        } else {
+            grid.innerHTML = trips.map(trip => renderTripCard(trip)).join('');
+            $$('[data-action]', grid).forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const action = btn.dataset.action;
+                    const tripId = btn.dataset.tripId;
+                    if (action === 'view') renderTripDetails(tripId);
+                    else if (action === 'edit') openTripForm(tripId);
+                    else if (action === 'delete') confirmDeleteTrip(tripId);
+                });
+            });
+        }
+    } catch (err) {
+        const msg = extractErrorMessage(err);
+        showToast('Failed to load trips: ' + msg, 'error');
+        $('#trips-grid').innerHTML = `<div class="col-span-full p-8 bg-red-50 border border-red-200 rounded-xl text-red-700">Error: ${escapeHtml(msg)}</div>`;
+    }
+}
+
+function renderTripCard(trip) {
+    const numDays = daysBetween(trip.start_date, trip.end_date);
+    const numActs = totalActivities(trip);
+    return `
+        <div class="trip-card bg-white rounded-xl border border-slate-200 hover:border-indigo-300 hover:shadow-md transition-all overflow-hidden" data-testid="trip-card" data-trip-id="${trip.id}">
+            <div class="h-24 bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center relative">
+                <span class="absolute inset-0 bg-black/10"></span>
+                <div class="relative text-white text-center px-4">
+                    <div class="text-xs font-medium uppercase tracking-wide opacity-90">${escapeHtml(trip.destination)}</div>
+                </div>
+            </div>
+            <div class="p-5">
+                <h3 class="font-semibold text-lg text-slate-800 mb-2" data-testid="trip-name">${escapeHtml(trip.name)}</h3>
+                <div class="flex items-center gap-2 text-sm text-slate-500 mb-1">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                    <span>${formatDate(trip.start_date)} — ${formatDate(trip.end_date)}</span>
+                </div>
+                <div class="flex items-center gap-4 text-sm text-slate-500 mb-4">
+                    <span class="flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>${numDays} day${numDays === 1 ? '' : 's'}</span>
+                    <span class="flex items-center gap-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>${numActs} activit${numActs === 1 ? 'y' : 'ies'}</span>
+                </div>
+                <div class="flex items-center gap-2 pt-3 border-t border-slate-100">
+                    <button class="flex-1 bg-slate-50 hover:bg-slate-100 text-slate-700 py-2 rounded-lg text-sm font-medium transition-colors" data-action="view" data-trip-id="${trip.id}" data-testid="view-trip-btn">
+                        View Details
+                    </button>
+                    <button class="p-2 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Edit" data-action="edit" data-trip-id="${trip.id}" data-testid="edit-trip-btn">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                    </button>
+                    <button class="p-2 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete" data-action="delete" data-trip-id="${trip.id}" data-testid="delete-trip-btn">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+async function confirmDeleteTrip(tripId) {
+    const confirm = await showConfirmModal(
+        'Delete Trip',
+        'Are you sure you want to delete this trip? This action cannot be undone.',
+        'Delete',
+        'bg-red-600 hover:bg-red-700'
+    );
+    if (!confirm) return;
+    try {
+        await apiRequest(`/api/trips/${tripId}`, 'DELETE');
+        showToast('Trip deleted successfully', 'success');
+        renderTripsList();
+    } catch (err) {
+        showToast('Failed to delete trip: ' + extractErrorMessage(err), 'error');
+    }
+}
+
+function showConfirmModal(title, message, confirmText = 'Confirm', confirmClass = 'bg-indigo-600 hover:bg-indigo-700') {
+    return new Promise((resolve) => {
+        const root = $('#modal-root');
+        root.innerHTML = `
+            <div id="confirm-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 fade-in">
+                <div class="bg-white rounded-xl shadow-2xl max-w-md w-full">
+                    <div class="p-6 border-b border-slate-100">
+                        <h3 class="text-lg font-semibold text-slate-800">${escapeHtml(title)}</h3>
+                    </div>
+                    <div class="p-6">
+                        <p class="text-slate-600">${escapeHtml(message)}</p>
+                    </div>
+                    <div class="p-6 pt-0 flex justify-end gap-3">
+                        <button id="modal-cancel" class="px-4 py-2 text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg font-medium transition-colors">Cancel</button>
+                        <button id="modal-confirm" class="px-4 py-2 text-white rounded-lg font-medium transition-colors ${confirmClass}">${escapeHtml(confirmText)}</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        const cleanup = (result) => {
+            $('#confirm-modal').remove();
+            resolve(result);
+        };
+        $('#modal-cancel').addEventListener('click', () => cleanup(false));
+        $('#modal-confirm').addEventListener('click', () => cleanup(true));
+    });
+}
+
+function openTripForm(tripId = null) {
+    if (!isAuthenticated()) { renderLogin(); return; }
+    editingTripId = tripId;
+    showView('trip-form');
+    const container = $('#view-trip-form');
+    const isEdit = !!tripId;
+    container.innerHTML = `
+        <div class="mb-6">
+            <button id="btn-back-to-list" class="text-sm text-slate-600 hover:text-indigo-600 flex items-center gap-1">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+                Back to Trips
+            </button>
+        </div>
+        <div class="bg-white rounded-xl border border-slate-200 p-8 max-w-2xl shadow-sm">
+            <h2 class="text-2xl font-bold text-slate-800 mb-6">${isEdit ? 'Edit Trip' : 'Create New Trip'}</h2>
+            <form id="trip-form" data-testid="${isEdit ? 'edit-trip-form' : 'create-trip-form'}" novalidate>
+                <div class="space-y-5">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1.5">Trip Name <span class="text-red-500">*</span></label>
+                        <input type="text" id="field-name" name="name" data-testid="trip-name-input" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" required placeholder="e.g. Summer Europe Tour">
+                        <div class="text-red-600 text-sm mt-1 hidden" id="err-name"></div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-700 mb-1.5">Destination <span class="text-red-500">*</span></label>
+                        <input type="text" id="field-destination" name="destination" data-testid="trip-destination-input" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" required placeholder="e.g. France, Italy, Spain">
+                        <div class="text-red-600 text-sm mt-1 hidden" id="err-destination"></div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1.5">Start Date <span class="text-red-500">*</span></label>
+                            <input type="date" id="field-start-date" name="start_date" data-testid="trip-start-date-input" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" required>
+                            <div class="text-red-600 text-sm mt-1 hidden" id="err-start_date"></div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-700 mb-1.5">End Date <span class="text-red-500">*</span></label>
+                            <input type="date" id="field-end-date" name="end_date" data-testid="trip-end-date-input" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" required>
+                            <div class="text-red-600 text-sm mt-1 hidden" id="err-end_date"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="text-sm text-slate-500 mt-2" id="form-error-general"></div>
+                <div class="mt-8 flex gap-3 justify-end">
+                    <button type="button" id="btn-cancel-form" class="px-5 py-2.5 text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg font-medium transition-colors">Cancel</button>
+                    <button type="submit" class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium shadow-sm transition-colors" data-testid="trip-submit-btn">${isEdit ? 'Save Changes' : 'Create Trip'}</button>
+                </div>
+            </form>
+        </div>
+    `;
+
+    $('#btn-back-to-list', container).addEventListener('click', () => {
+        editingTripId = null;
+        renderTripsList();
+    });
+    $('#btn-cancel-form', container).addEventListener('click', () => {
+        editingTripId = null;
+        renderTripsList();
+    });
+    const tripForm = $('#trip-form', container);
+
+    if (isEdit) {
+        (async () => {
+            try {
+                const { data: trip } = await apiRequest(`/api/trips/${tripId}`);
+                $('#field-name').value = trip.name;
+                $('#field-destination').value = trip.destination;
+                $('#field-start-date').value = trip.start_date;
+                $('#field-end-date').value = trip.end_date;
+            } catch (err) {
+                showToast('Failed to load trip: ' + extractErrorMessage(err), 'error');
+                editingTripId = null;
+                renderTripsList();
+            }
+        })();
+    }
+
+    tripForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        $$('[id^="err-"]', container).forEach(el => { el.classList.add('hidden'); el.textContent = ''; });
+        $('#form-error-general', container).textContent = '';
+
+        const name = $('#field-name', container).value.trim();
+        const destination = $('#field-destination', container).value.trim();
+        const start_date = $('#field-start-date', container).value;
+        const end_date = $('#field-end-date', container).value;
+
+        let hasError = false;
+        if (!name) { $('#err-name', container).textContent = 'Trip name is required'; $('#err-name', container).classList.remove('hidden'); hasError = true; }
+        if (!destination) { $('#err-destination', container).textContent = 'Destination is required'; $('#err-destination', container).classList.remove('hidden'); hasError = true; }
+        if (!start_date) { $('#err-start_date', container).textContent = 'Start date is required'; $('#err-start_date', container).classList.remove('hidden'); hasError = true; }
+        if (!end_date) { $('#err-end_date', container).textContent = 'End date is required'; $('#err-end_date', container).classList.remove('hidden'); hasError = true; }
+        if (start_date && end_date && new Date(end_date) < new Date(start_date)) {
+            $('#err-end_date', container).textContent = 'End date cannot be earlier than start date';
+            $('#err-end_date', container).classList.remove('hidden');
+            hasError = true;
+        }
+        if (hasError) return;
+
+        const payload = { name, destination, start_date, end_date };
+        try {
+            if (isEdit) {
+                await apiRequest(`/api/trips/${tripId}`, 'PUT', payload);
+                showToast('Trip updated successfully', 'success');
+            } else {
+                const { data: newTrip } = await apiRequest('/api/trips', 'POST', payload);
+                showToast('Trip created successfully', 'success');
+                editingTripId = null;
+                renderTripDetails(newTrip.id);
+                return;
+            }
+            editingTripId = null;
+            renderTripsList();
+        } catch (err) {
+            const msg = extractErrorMessage(err);
+            $('#form-error-general', container).textContent = msg;
+            showToast(msg, 'error');
+        }
+    });
+}
+
+async function renderTripDetails(tripId) {
+    if (!isAuthenticated()) { renderLogin(); return; }
+    currentTripId = tripId;
+    showView('trip-details');
+    const container = $('#view-trip-details');
+    container.innerHTML = `
+        <div class="mb-6">
+            <button id="btn-back-to-list" class="text-sm text-slate-600 hover:text-indigo-600 flex items-center gap-1">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+                Back to Trips
+            </button>
+        </div>
+        <div id="trip-details-content">Loading...</div>
+    `;
+
+    $('#btn-back-to-list', container).addEventListener('click', () => {
+        currentTripId = null;
+        renderTripsList();
+    });
+
+    try {
+        const [{ data: trip }, { data: budgetSummary }, { data: expenses }, { data: journal }] = await Promise.all([
+            apiRequest(`/api/trips/${tripId}`),
+            apiRequest(`/api/trips/${tripId}/budget`),
+            apiRequest(`/api/trips/${tripId}/expenses`),
+            apiRequest(`/api/trips/${tripId}/journal`)
+        ]);
+        renderTripDetailsContent(trip, budgetSummary, expenses, journal);
+    } catch (err) {
+        const msg = extractErrorMessage(err);
+        container.innerHTML = `<div class="p-8 bg-red-50 border border-red-200 rounded-xl text-red-700">Error: ${escapeHtml(msg)}</div>`;
+        showToast('Failed to load trip: ' + msg, 'error');
+    }
+}
+
+function renderTripDetailsContent(trip, budgetSummary, expenses, journal) {
+    const numDays = daysBetween(trip.start_date, trip.end_date);
+    const numActs = totalActivities(trip);
+    const sortedDays = [...(trip.days || [])].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const bs = budgetSummary || { budget: trip.budget || 0, currency: trip.currency || 'USD', total_spent: 0, remaining: trip.budget || 0, over_budget: false };
+    const sortedExpenses = [...(expenses || [])].sort((a, b) => new Date(b.date) - new Date(a.date));
+    const sortedJournal = [...(journal || [])].sort((a, b) => {
+        const dateDiff = new Date(b.date) - new Date(a.date);
+        if (dateDiff !== 0) return dateDiff;
+        return new Date(b.created_at) - new Date(a.created_at);
+    });
+    const container = $('#trip-details-content');
+
+    const categoryBadgeColor = (cat) => ({
+        Accommodation: 'bg-indigo-100 text-indigo-700 border-indigo-200',
+        Food: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+        Transportation: 'bg-sky-100 text-sky-700 border-sky-200',
+        Activities: 'bg-amber-100 text-amber-700 border-amber-200',
+        Shopping: 'bg-pink-100 text-pink-700 border-pink-200',
+        Other: 'bg-slate-100 text-slate-700 border-slate-200'
+    }[cat] || 'bg-slate-100 text-slate-700 border-slate-200');
+
+    const remainingClass = bs.over_budget ? 'text-red-600 font-semibold' : 'text-emerald-600 font-semibold';
+    const remainingIcon = bs.over_budget ? '⚠' : '✓';
+
+    container.innerHTML = `
+        <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden mb-8">
+            <div class="h-32 bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 flex items-end">
+                <div class="p-6 w-full bg-gradient-to-t from-black/40 to-transparent">
+                    <div class="text-white/80 text-sm font-medium uppercase tracking-wide mb-1">${escapeHtml(trip.destination)}</div>
+                    <h2 class="text-3xl font-bold text-white" data-testid="trip-details-name">${escapeHtml(trip.name)}</h2>
+                </div>
+            </div>
+            <div class="p-6 flex flex-wrap gap-6 items-center justify-between border-b border-slate-100">
+                <div class="flex flex-wrap gap-6">
+                    <div>
+                        <div class="text-xs text-slate-500 uppercase tracking-wide mb-0.5">Dates</div>
+                        <div class="font-medium text-slate-800">${formatDate(trip.start_date)} — ${formatDate(trip.end_date)}</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-slate-500 uppercase tracking-wide mb-0.5">Duration</div>
+                        <div class="font-medium text-slate-800">${numDays} day${numDays === 1 ? '' : 's'}</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-slate-500 uppercase tracking-wide mb-0.5">Itinerary</div>
+                        <div class="font-medium text-slate-800">${sortedDays.length} day${sortedDays.length === 1 ? '' : 's'} · ${numActs} activit${numActs === 1 ? 'y' : 'ies'}</div>
+                    </div>
+                </div>
+                <div class="flex gap-2">
+                    <button id="btn-edit-trip" class="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium transition-colors flex items-center gap-2" data-testid="details-edit-btn">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                        Edit Trip
+                    </button>
+                    <button id="btn-delete-trip" class="px-4 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg font-medium transition-colors flex items-center gap-2" data-testid="details-delete-btn">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        Delete
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-6 mb-8">
+            <div class="flex items-center justify-between mb-5">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 bg-emerald-100 rounded-lg flex items-center justify-center">
+                        <svg class="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    </div>
+                    <h3 class="text-xl font-bold text-slate-800">Budget</h3>
+                    ${bs.over_budget ? `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-700 border border-red-200" data-testid="budget-over-budget">${remainingIcon} Over Budget</span>` : `<span class="hidden" data-testid="budget-over-budget"></span>`}
+                </div>
+                <button id="btn-edit-budget" class="text-sm px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-medium transition-colors flex items-center gap-2" data-testid="save-budget">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                    Edit Budget
+                </button>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div class="p-4 rounded-lg bg-slate-50 border border-slate-200">
+                    <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">Budget</div>
+                    <div class="text-2xl font-bold text-slate-800" data-testid="budget-amount">${formatCurrency(bs.budget, bs.currency)}</div>
+                    <div class="text-xs text-slate-500 mt-1" data-testid="budget-currency">${escapeHtml(bs.currency)}</div>
+                </div>
+                <div class="p-4 rounded-lg bg-slate-50 border border-slate-200">
+                    <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">Spent</div>
+                    <div class="text-2xl font-bold text-slate-800" data-testid="budget-spent">${formatCurrency(bs.total_spent, bs.currency)}</div>
+                    <div class="text-xs text-slate-500 mt-1">${bs.budget > 0 ? Math.round((bs.total_spent / bs.budget) * 100) : 0}% of budget</div>
+                </div>
+                <div class="p-4 rounded-lg ${bs.over_budget ? 'bg-red-50 border border-red-200' : 'bg-emerald-50 border border-emerald-200'}">
+                    <div class="text-xs ${bs.over_budget ? 'text-red-500' : 'text-emerald-600'} uppercase tracking-wide mb-1">Remaining</div>
+                    <div class="text-2xl font-bold ${remainingClass}" data-testid="budget-remaining">${formatCurrency(bs.remaining, bs.currency)}</div>
+                    <div class="text-xs ${bs.over_budget ? 'text-red-500' : 'text-emerald-600'} mt-1">${bs.over_budget ? `${Math.abs(Math.round(bs.remaining))} over` : 'on track'}</div>
+                </div>
+                <div class="p-4 rounded-lg bg-slate-50 border border-slate-200">
+                    <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">Expenses</div>
+                    <div class="text-2xl font-bold text-slate-800">${sortedExpenses.length}</div>
+                    <div class="text-xs text-slate-500 mt-1">recorded item${sortedExpenses.length === 1 ? '' : 's'}</div>
+                </div>
+            </div>
+            <div class="mt-5 h-2 rounded-full bg-slate-100 overflow-hidden">
+                <div class="h-full rounded-full transition-all ${bs.over_budget ? 'bg-red-500' : 'bg-indigo-500'}" style="width: ${Math.min(bs.budget > 0 ? (bs.total_spent / bs.budget) * 100 : 0, 100)}%"></div>
+            </div>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-6 mb-8">
+            <div class="flex items-center justify-between mb-5">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center">
+                        <svg class="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
+                    </div>
+                    <h3 class="text-xl font-bold text-slate-800">Expenses</h3>
+                </div>
+                <button id="btn-add-expense" class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm transition-colors flex items-center gap-2" data-testid="add-expense">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                    Add Expense
+                </button>
+            </div>
+            <div data-testid="expense-list">
+                ${sortedExpenses.length === 0 ? `
+                    <div class="border-2 border-dashed border-slate-200 p-10 text-center rounded-xl">
+                        <div class="mx-auto w-14 h-14 bg-slate-100 rounded-full flex items-center justify-center mb-3">
+                            <svg class="w-7 h-7 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+                        </div>
+                        <h4 class="text-lg font-semibold text-slate-700 mb-1">No expenses yet</h4>
+                        <p class="text-slate-500">Start tracking your trip costs by adding your first expense.</p>
+                    </div>
+                ` : `
+                    <div class="overflow-x-auto rounded-lg border border-slate-200">
+                        <table class="min-w-full divide-y divide-slate-200 text-sm">
+                            <thead class="bg-slate-50">
+                                <tr>
+                                    <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">Description</th>
+                                    <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">Category</th>
+                                    <th class="px-4 py-3 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">Amount</th>
+                                    <th class="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wide">Date</th>
+                                    <th class="px-4 py-3 text-right text-xs font-semibold text-slate-500 uppercase tracking-wide">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100 bg-white">
+                                ${sortedExpenses.map(exp => `
+                                    <tr class="hover:bg-slate-50 transition-colors" data-expense-id="${exp.id}" data-testid="expense-row">
+                                        <td class="px-4 py-3">
+                                            <div class="font-medium text-slate-800" data-testid="expense-description-text">${escapeHtml(exp.description)}</div>
+                                        </td>
+                                        <td class="px-4 py-3">
+                                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${categoryBadgeColor(exp.category)}" data-testid="expense-category-badge">${escapeHtml(exp.category)}</span>
+                                        </td>
+                                        <td class="px-4 py-3 text-right font-semibold text-slate-800" data-testid="expense-amount-text">${formatCurrency(exp.amount, exp.currency)}</td>
+                                        <td class="px-4 py-3 text-slate-600" data-testid="expense-date-text">${formatDate(exp.date)}</td>
+                                        <td class="px-4 py-3 text-right">
+                                            <div class="inline-flex gap-1">
+                                                <button class="p-1.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors" title="Edit expense" data-expense-action="edit" data-expense-id="${exp.id}" data-testid="edit-expense-btn">
+                                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                                                </button>
+                                                <button class="p-1.5 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete expense" data-expense-action="delete" data-expense-id="${exp.id}" data-testid="delete-expense-btn">
+                                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                `}
+            </div>
+        </div>
+
+        <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-6 mb-8" data-testid="journal-section">
+            <div class="flex items-center justify-between mb-5">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 bg-violet-100 rounded-lg flex items-center justify-center">
+                        <svg class="w-5 h-5 text-violet-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
+                    </div>
+                    <div>
+                        <h3 class="text-xl font-bold text-slate-800">Travel Journal</h3>
+                        <p class="text-sm text-slate-500">${sortedJournal.length} entr${sortedJournal.length === 1 ? 'y' : 'ies'}</p>
+                    </div>
+                </div>
+                <button id="btn-add-journal" class="text-sm bg-violet-600 hover:bg-violet-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm transition-colors flex items-center gap-2" data-testid="add-journal-entry">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                    Add Entry
+                </button>
+            </div>
+            <div data-testid="journal-list">
+                ${sortedJournal.length === 0 ? `
+                    <div class="border-2 border-dashed border-slate-200 p-10 text-center rounded-xl">
+                        <div class="mx-auto w-14 h-14 bg-slate-100 rounded-full flex items-center justify-center mb-3">
+                            <svg class="w-7 h-7 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>
+                        </div>
+                        <h4 class="text-lg font-semibold text-slate-700 mb-1">No journal entries yet</h4>
+                        <p class="text-slate-500">Start documenting your memories by adding your first journal entry.</p>
+                    </div>
+                ` : `
+                    <div class="space-y-3">
+                        ${sortedJournal.map(entry => {
+                            const preview = entry.content && entry.content.length > 200
+                                ? entry.content.substring(0, 200).replace(/\n/g, ' ') + '...'
+                                : entry.content.replace(/\n/g, ' ');
+                            return `
+                                <div class="p-5 rounded-xl border border-slate-200 hover:border-violet-300 hover:shadow-sm transition-all cursor-pointer group" data-journal-action="view" data-journal-id="${entry.id}" data-testid="journal-entry-card">
+                                    <div class="flex items-start justify-between gap-4">
+                                        <div class="flex-1 min-w-0">
+                                            <div class="flex items-center gap-3 mb-2">
+                                                <div class="text-xs font-semibold text-violet-600 bg-violet-50 px-2.5 py-1 rounded-md" data-testid="journal-entry-date">${formatDate(entry.date)}</div>
+                                                <h4 class="font-semibold text-slate-800 group-hover:text-violet-700 transition-colors" data-testid="journal-entry-title">${escapeHtml(entry.title)}</h4>
+                                            </div>
+                                            <p class="text-sm text-slate-600 line-clamp-3" data-testid="journal-entry-preview">${escapeHtml(preview)}</p>
+                                        </div>
+                                        <div class="flex gap-1 flex-shrink-0" onclick="event.stopPropagation()">
+                                            <button class="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Edit entry" data-journal-action="edit" data-journal-id="${entry.id}" data-testid="edit-journal-entry">
+                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                                            </button>
+                                            <button class="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete entry" data-journal-action="delete" data-journal-id="${entry.id}" data-testid="delete-journal-entry">
+                                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                `}
+            </div>
+        </div>
+
+        <div class="mb-6 flex items-center justify-between">
+            <h3 class="text-xl font-bold text-slate-800">Itinerary</h3>
+            <button id="btn-add-day" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm transition-colors flex items-center gap-2" data-testid="add-day-btn">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                Add Day
+            </button>
+        </div>
+
+        <div id="days-container" class="space-y-5">
+            ${sortedDays.length === 0 ? `
+                <div class="bg-white rounded-xl border-2 border-dashed border-slate-200 p-12 text-center">
+                    <div class="mx-auto w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
+                        <svg class="w-8 h-8 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                    </div>
+                    <h4 class="text-lg font-semibold text-slate-700 mb-1">No days added</h4>
+                    <p class="text-slate-500 mb-5">Start building your itinerary by adding your first day.</p>
+                </div>
+            ` : sortedDays.map((day, idx) => renderDayCard(day, idx + 1)).join('')}
+        </div>
+    `;
+
+    $('#btn-edit-trip', container).addEventListener('click', () => openTripForm(trip.id));
+    $('#btn-delete-trip', container).addEventListener('click', async () => {
+        const confirm = await showConfirmModal(
+            'Delete Trip',
+            'Are you sure you want to delete this trip? This action cannot be undone.',
+            'Delete',
+            'bg-red-600 hover:bg-red-700'
+        );
+        if (!confirm) return;
+        try {
+            await apiRequest(`/api/trips/${trip.id}`, 'DELETE');
+            showToast('Trip deleted successfully', 'success');
+            currentTripId = null;
+            renderTripsList();
+        } catch (err) {
+            showToast('Failed to delete trip: ' + extractErrorMessage(err), 'error');
+        }
+    });
+
+    $('#btn-add-day', container).addEventListener('click', () => openDayForm());
+
+    $$('[data-day-action]', container).forEach(btn => {
+        btn.addEventListener('click', () => {
+            const action = btn.dataset.dayAction;
+            const dayId = btn.dataset.dayId;
+            if (action === 'edit-day') openDayForm(dayId);
+            else if (action === 'delete-day') confirmDeleteDay(dayId);
+            else if (action === 'add-activity') openActivityForm(dayId);
+        });
+    });
+
+    $$('[data-activity-action]', container).forEach(btn => {
+        btn.addEventListener('click', () => {
+            const action = btn.dataset.activityAction;
+            const dayId = btn.dataset.dayId;
+            const activityId = btn.dataset.activityId;
+            if (action === 'edit') openActivityForm(dayId, activityId);
+            else if (action === 'delete') confirmDeleteActivity(dayId, activityId);
+        });
+    });
+
+    const editBudgetBtn = $('#btn-edit-budget', container);
+    if (editBudgetBtn) {
+        editBudgetBtn.addEventListener('click', () => openBudgetForm(trip, bs));
+    }
+
+    const addExpenseBtn = $('#btn-add-expense', container);
+    if (addExpenseBtn) {
+        addExpenseBtn.addEventListener('click', () => openExpenseForm(trip));
+    }
+
+    $$('[data-expense-action]', container).forEach(btn => {
+        btn.addEventListener('click', () => {
+            const action = btn.dataset.expenseAction;
+            const expenseId = btn.dataset.expenseId;
+            if (action === 'edit') openExpenseForm(trip, expenseId);
+            else if (action === 'delete') confirmDeleteExpense(expenseId);
+        });
+    });
+
+    const addJournalBtn = $('#btn-add-journal', container);
+    if (addJournalBtn) {
+        addJournalBtn.addEventListener('click', () => openJournalEntryForm(trip));
+    }
+
+    $$('[data-journal-action]', container).forEach(el => {
+        el.addEventListener('click', () => {
+            const action = el.dataset.journalAction;
+            const entryId = el.dataset.journalId;
+            if (action === 'view') openJournalEntryView(trip, entryId);
+            else if (action === 'edit') openJournalEntryForm(trip, entryId);
+            else if (action === 'delete') confirmDeleteJournalEntry(entryId);
+        });
+    });
+}
+
+function renderDayCard(day, dayNumber) {
+    const activities = day.activities || [];
+    return `
+        <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden fade-in" data-day-id="${day.id}" data-testid="day-card">
+            <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 bg-indigo-600 text-white rounded-lg flex items-center justify-center font-bold">
+                        D${dayNumber}
+                    </div>
+                    <div>
+                        <div class="font-semibold text-slate-800 text-lg">
+                            ${escapeHtml(day.title || `Day ${dayNumber}`)}
+                        </div>
+                        <div class="text-sm text-slate-500">${formatDate(day.date)}</div>
+                    </div>
+                </div>
+                <div class="flex gap-1">
+                    <button class="p-2 text-slate-500 hover:text-indigo-600 hover:bg-white rounded-md transition-colors" title="Edit day" data-day-action="edit-day" data-day-id="${day.id}" data-testid="edit-day-btn">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                    </button>
+                    <button class="p-2 text-slate-500 hover:text-red-600 hover:bg-white rounded-md transition-colors" title="Delete day" data-day-action="delete-day" data-day-id="${day.id}" data-testid="delete-day-btn">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="p-5">
+                <div class="space-y-3 mb-4">
+                    ${activities.length === 0 ? `
+                        <div class="text-sm text-slate-400 italic py-4 text-center bg-slate-50 rounded-lg">No activities planned for this day yet.</div>
+                    ` : activities.map(act => `
+                        <div class="flex items-start gap-3 p-4 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors" data-activity-id="${act.id}" data-testid="activity-card">
+                            <div class="mt-0.5">
+                                <div class="w-8 h-8 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center flex-shrink-0">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                                </div>
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <div class="font-medium text-slate-800" data-testid="activity-name">${escapeHtml(act.name)}</div>
+                                ${act.location ? `<div class="text-sm text-slate-500 mt-0.5 flex items-center gap-1"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>${escapeHtml(act.location)}</div>` : ''}
+                                ${act.description ? `<div class="text-sm text-slate-600 mt-1">${escapeHtml(act.description)}</div>` : ''}
+                            </div>
+                            <div class="flex gap-1 flex-shrink-0">
+                                <button class="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors" title="Edit activity" data-activity-action="edit" data-day-id="${day.id}" data-activity-id="${act.id}" data-testid="edit-activity-btn">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                                </button>
+                                <button class="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors" title="Delete activity" data-activity-action="delete" data-day-id="${day.id}" data-activity-id="${act.id}" data-testid="delete-activity-btn">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                </button>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+                <button class="w-full py-2.5 border-2 border-dashed border-slate-300 rounded-lg text-slate-500 hover:text-indigo-600 hover:border-indigo-400 hover:bg-indigo-50/50 transition-colors text-sm font-medium flex items-center justify-center gap-2" data-day-action="add-activity" data-day-id="${day.id}" data-testid="add-activity-btn">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                    Add Activity
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+function openDayForm(dayId = null) {
+    showModalForm({
+        title: dayId ? 'Edit Day' : 'Add Day',
+        submitText: dayId ? 'Save Changes' : 'Add Day',
+        fields: [
+            { id: 'date', label: 'Date', type: 'date', required: true },
+            { id: 'title', label: 'Title (optional)', type: 'text', placeholder: 'e.g. Arrival in Paris' }
+        ],
+        onLoad: async () => {
+            if (dayId) {
+                try {
+                    const { data: day } = await apiRequest(`/api/trips/${currentTripId}/days/${dayId}`);
+                    $('#modal-field-date').value = day.date;
+                    $('#modal-field-title').value = day.title || '';
+                } catch (err) {
+                    showToast('Failed to load day: ' + extractErrorMessage(err), 'error');
+                }
+            }
+        },
+        onSubmit: async (values) => {
+            if (!values.date) throw new Error('Date is required');
+            const payload = { date: values.date };
+            if (values.title !== undefined) payload.title = values.title || null;
+            if (dayId) {
+                await apiRequest(`/api/trips/${currentTripId}/days/${dayId}`, 'PUT', payload);
+                showToast('Day updated successfully', 'success');
+            } else {
+                await apiRequest(`/api/trips/${currentTripId}/days`, 'POST', payload);
+                showToast('Day added successfully', 'success');
+            }
+            renderTripDetails(currentTripId);
+        }
+    });
+}
+
+async function confirmDeleteDay(dayId) {
+    const confirm = await showConfirmModal(
+        'Delete Day',
+        'Are you sure you want to delete this day and all its activities? This cannot be undone.',
+        'Delete Day',
+        'bg-red-600 hover:bg-red-700'
+    );
+    if (!confirm) return;
+    try {
+        await apiRequest(`/api/trips/${currentTripId}/days/${dayId}`, 'DELETE');
+        showToast('Day deleted successfully', 'success');
+        renderTripDetails(currentTripId);
+    } catch (err) {
+        showToast('Failed to delete day: ' + extractErrorMessage(err), 'error');
+    }
+}
+
+function openActivityForm(dayId, activityId = null) {
+    showModalForm({
+        title: activityId ? 'Edit Activity' : 'Add Activity',
+        submitText: activityId ? 'Save Changes' : 'Add Activity',
+        fields: [
+            { id: 'name', label: 'Activity Name', type: 'text', required: true, placeholder: 'e.g. Visit Eiffel Tower' },
+            { id: 'location', label: 'Location (optional)', type: 'text', placeholder: 'e.g. Champ de Mars, Paris' },
+            { id: 'description', label: 'Description (optional)', type: 'textarea', placeholder: 'Add any notes or details about this activity...' }
+        ],
+        onLoad: async () => {
+            if (activityId) {
+                try {
+                    const { data: act } = await apiRequest(`/api/trips/${currentTripId}/days/${dayId}/activities/${activityId}`);
+                    $('#modal-field-name').value = act.name;
+                    $('#modal-field-location').value = act.location || '';
+                    $('#modal-field-description').value = act.description || '';
+                } catch (err) {
+                    showToast('Failed to load activity: ' + extractErrorMessage(err), 'error');
+                }
+            }
+        },
+        onSubmit: async (values) => {
+            if (!values.name || !values.name.trim()) throw new Error('Activity name is required');
+            const payload = { name: values.name.trim() };
+            if (values.location !== undefined) payload.location = values.location || null;
+            if (values.description !== undefined) payload.description = values.description || null;
+            if (activityId) {
+                await apiRequest(`/api/trips/${currentTripId}/days/${dayId}/activities/${activityId}`, 'PUT', payload);
+                showToast('Activity updated successfully', 'success');
+            } else {
+                await apiRequest(`/api/trips/${currentTripId}/days/${dayId}/activities`, 'POST', payload);
+                showToast('Activity added successfully', 'success');
+            }
+            renderTripDetails(currentTripId);
+        }
+    });
+}
+
+async function confirmDeleteActivity(dayId, activityId) {
+    const confirm = await showConfirmModal(
+        'Delete Activity',
+        'Are you sure you want to delete this activity? This cannot be undone.',
+        'Delete',
+        'bg-red-600 hover:bg-red-700'
+    );
+    if (!confirm) return;
+    try {
+        await apiRequest(`/api/trips/${currentTripId}/days/${dayId}/activities/${activityId}`, 'DELETE');
+        showToast('Activity deleted successfully', 'success');
+        renderTripDetails(currentTripId);
+    } catch (err) {
+        showToast('Failed to delete activity: ' + extractErrorMessage(err), 'error');
+    }
+}
+
+function openBudgetForm(trip, currentBs) {
+    const tripCurrency = (currentBs && currentBs.currency) || trip.currency || 'USD';
+    const tripBudget = currentBs && currentBs.budget != null ? Number(currentBs.budget) : Number(trip.budget || 0);
+    showModalForm({
+        title: 'Edit Budget',
+        submitText: 'Save Budget',
+        fields: [
+            { id: 'budget', label: 'Budget Amount', type: 'number', required: true, placeholder: 'e.g. 2000' },
+            { id: 'currency', label: 'Currency', type: 'select', required: true, options: SUPPORTED_CURRENCIES }
+        ],
+        onLoad: () => {
+            $('#modal-field-budget').value = tripBudget;
+            $('#modal-field-currency').value = tripCurrency;
+        },
+        onSubmit: async (values) => {
+            const budget = Number(values.budget);
+            if (isNaN(budget) || budget < 0) throw new Error('Budget must be a number >= 0');
+            const payload = { budget };
+            if (values.currency) payload.currency = values.currency;
+            await apiRequest(`/api/trips/${currentTripId}/budget`, 'PUT', payload);
+            showToast('Budget updated successfully', 'success');
+            renderTripDetails(currentTripId);
+        }
+    });
+}
+
+function openExpenseForm(trip, expenseId = null) {
+    const tripCurrency = trip.currency || 'USD';
+    const tripStart = trip.start_date;
+    const tripEnd = trip.end_date;
+    showModalForm({
+        title: expenseId ? 'Edit Expense' : 'Add Expense',
+        submitText: expenseId ? 'Save Changes' : 'Add Expense',
+        fields: [
+            { id: 'description', label: 'Description', type: 'text', required: true, placeholder: 'e.g. Hotel stay in Hanoi' },
+            { id: 'category', label: 'Category', type: 'select', required: true, options: EXPENSE_CATEGORIES },
+            { id: 'amount', label: 'Amount', type: 'number', required: true, placeholder: 'e.g. 150.00' },
+            { id: 'currency', label: 'Currency (locked to trip currency)', type: 'select', required: true, disabled: true, options: SUPPORTED_CURRENCIES },
+            { id: 'date', label: 'Date', type: 'date', required: true }
+        ],
+        onLoad: async () => {
+            $('#modal-field-currency').value = tripCurrency;
+            const today = new Date();
+            const defaultDate = today.toISOString().split('T')[0];
+            const clampInRange = (d) => {
+                if (!d) return tripStart || defaultDate;
+                if (tripStart && d < tripStart) return tripStart;
+                if (tripEnd && d > tripEnd) return tripEnd;
+                return d;
+            };
+            if (!expenseId) {
+                $('#modal-field-date').value = clampInRange(defaultDate);
+            } else {
+                try {
+                    const { data: exp } = await apiRequest(`/api/trips/${currentTripId}/expenses/${expenseId}`);
+                    $('#modal-field-description').value = exp.description || '';
+                    $('#modal-field-category').value = exp.category;
+                    $('#modal-field-amount').value = Number(exp.amount);
+                    $('#modal-field-date').value = exp.date;
+                } catch (err) {
+                    showToast('Failed to load expense: ' + extractErrorMessage(err), 'error');
+                }
+            }
+        },
+        onSubmit: async (values) => {
+            if (!values.description || !values.description.trim()) throw new Error('Description is required');
+            if (!values.category) throw new Error('Category is required');
+            const amount = Number(values.amount);
+            if (isNaN(amount) || amount <= 0) throw new Error('Amount must be greater than 0');
+            if (!values.currency) throw new Error('Currency is required');
+            if (values.currency !== tripCurrency) {
+                throw new Error(`Expense currency must match trip currency (${tripCurrency})`);
+            }
+            if (!values.date) throw new Error('Date is required');
+            if (tripStart && values.date < tripStart) {
+                throw new Error(`Expense date must be on or after trip start (${formatDate(tripStart)})`);
+            }
+            if (tripEnd && values.date > tripEnd) {
+                throw new Error(`Expense date must be on or before trip end (${formatDate(tripEnd)})`);
+            }
+            const payload = {
+                description: values.description.trim(),
+                category: values.category,
+                amount: amount,
+                currency: values.currency,
+                date: values.date
+            };
+            if (expenseId) {
+                await apiRequest(`/api/trips/${currentTripId}/expenses/${expenseId}`, 'PUT', payload);
+                showToast('Expense updated successfully', 'success');
+            } else {
+                await apiRequest(`/api/trips/${currentTripId}/expenses`, 'POST', payload);
+                showToast('Expense added successfully', 'success');
+            }
+            renderTripDetails(currentTripId);
+        }
+    });
+}
+
+async function confirmDeleteExpense(expenseId) {
+    const confirm = await showConfirmModal(
+        'Delete Expense',
+        'Are you sure you want to delete this expense? This cannot be undone.',
+        'Delete Expense',
+        'bg-red-600 hover:bg-red-700'
+    );
+    if (!confirm) return;
+    try {
+        await apiRequest(`/api/trips/${currentTripId}/expenses/${expenseId}`, 'DELETE');
+        showToast('Expense deleted successfully', 'success');
+        renderTripDetails(currentTripId);
+    } catch (err) {
+        showToast('Failed to delete expense: ' + extractErrorMessage(err), 'error');
+    }
+}
+
+function openJournalEntryForm(trip, entryId = null) {
+    const tripStart = trip.start_date;
+    const tripEnd = trip.end_date;
+    showModalForm({
+        title: entryId ? 'Edit Journal Entry' : 'Add Journal Entry',
+        submitText: entryId ? 'Save Changes' : 'Save Entry',
+        fields: [
+            { id: 'title', label: 'Title', type: 'text', required: true, placeholder: 'e.g. Arrival in Paris' },
+            { id: 'date', label: 'Date', type: 'date', required: true },
+            { id: 'content', label: 'Content', type: 'textarea', required: true, placeholder: 'Write about your day...' }
+        ],
+        onLoad: async () => {
+            const titleField = document.getElementById('modal-field-title');
+            if (titleField) titleField.setAttribute('maxlength', '100');
+            const contentField = document.getElementById('modal-field-content');
+            if (contentField) contentField.setAttribute('maxlength', '5000');
+            const today = new Date();
+            const defaultDate = today.toISOString().split('T')[0];
+            const clampInRange = (d) => {
+                if (!d) return tripStart || defaultDate;
+                if (tripStart && d < tripStart) return tripStart;
+                if (tripEnd && d > tripEnd) return tripEnd;
+                return d;
+            };
+            if (!entryId) {
+                document.getElementById('modal-field-date').value = clampInRange(defaultDate);
+            } else {
+                try {
+                    const { data: entry } = await apiRequest(`/api/trips/${currentTripId}/journal/${entryId}`);
+                    document.getElementById('modal-field-title').value = entry.title || '';
+                    document.getElementById('modal-field-date').value = entry.date;
+                    document.getElementById('modal-field-content').value = entry.content || '';
+                } catch (err) {
+                    showToast('Failed to load journal entry: ' + extractErrorMessage(err), 'error');
+                }
+            }
+        },
+        onSubmit: async (values) => {
+            if (!values.title || !values.title.trim()) throw new Error('Title is required');
+            if (values.title.length > 100) throw new Error('Title must not exceed 100 characters');
+            if (!values.content || !values.content.trim()) throw new Error('Content is required');
+            if (values.content.length > 5000) throw new Error('Content must not exceed 5000 characters');
+            if (!values.date) throw new Error('Date is required');
+            if (tripStart && values.date < tripStart) {
+                throw new Error(`Journal entry date must be on or after trip start (${formatDate(tripStart)})`);
+            }
+            if (tripEnd && values.date > tripEnd) {
+                throw new Error(`Journal entry date must be on or before trip end (${formatDate(tripEnd)})`);
+            }
+            const payload = {
+                title: values.title.trim(),
+                date: values.date,
+                content: values.content
+            };
+            if (entryId) {
+                await apiRequest(`/api/trips/${currentTripId}/journal/${entryId}`, 'PUT', payload);
+                showToast('Journal entry updated successfully', 'success');
+            } else {
+                await apiRequest(`/api/trips/${currentTripId}/journal`, 'POST', payload);
+                showToast('Journal entry added successfully', 'success');
+            }
+            renderTripDetails(currentTripId);
+        }
+    });
+}
+
+async function openJournalEntryView(trip, entryId) {
+    try {
+        const { data: entry } = await apiRequest(`/api/trips/${currentTripId}/journal/${entryId}`);
+        const root = $('#modal-root');
+        root.innerHTML = `
+            <div id="journal-view-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 fade-in">
+                <div class="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                    <div class="p-6 border-b border-slate-100 flex items-start justify-between sticky top-0 bg-white z-10">
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-3 mb-2">
+                                <div class="text-xs font-semibold text-violet-600 bg-violet-50 px-2.5 py-1 rounded-md" data-testid="journal-view-date">${formatDate(entry.date)}</div>
+                            </div>
+                            <h3 class="text-xl font-bold text-slate-800" data-testid="journal-view-title">${escapeHtml(entry.title)}</h3>
+                        </div>
+                        <button id="journal-view-close" class="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-md transition-colors flex-shrink-0 ml-4">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+                    <div class="p-6">
+                        <div class="prose prose-slate max-w-none" data-testid="journal-view-content" style="white-space: pre-wrap; word-break: break-word;">${escapeHtml(entry.content)}</div>
+                    </div>
+                    <div class="p-6 pt-0 flex justify-end gap-3">
+                        <button id="journal-view-cancel" class="px-5 py-2.5 text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg font-medium transition-colors">Close</button>
+                        <button id="journal-view-edit" class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium shadow-sm transition-colors flex items-center gap-2" data-testid="journal-view-edit-btn">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+                            Edit
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+        const cleanup = () => { $('#journal-view-modal').remove(); };
+        $('#journal-view-close').addEventListener('click', cleanup);
+        $('#journal-view-cancel').addEventListener('click', cleanup);
+        $('#journal-view-edit').addEventListener('click', () => {
+            cleanup();
+            openJournalEntryForm(trip, entryId);
+        });
+    } catch (err) {
+        showToast('Failed to load journal entry: ' + extractErrorMessage(err), 'error');
+    }
+}
+
+async function confirmDeleteJournalEntry(entryId) {
+    const confirm = await showConfirmModal(
+        'Delete Journal Entry',
+        'Are you sure you want to delete this journal entry? This cannot be undone.',
+        'Delete Entry',
+        'bg-red-600 hover:bg-red-700'
+    );
+    if (!confirm) return;
+    try {
+        await apiRequest(`/api/trips/${currentTripId}/journal/${entryId}`, 'DELETE');
+        showToast('Journal entry deleted successfully', 'success');
+        renderTripDetails(currentTripId);
+    } catch (err) {
+        showToast('Failed to delete journal entry: ' + extractErrorMessage(err), 'error');
+    }
+}
+
+function showModalForm({ title, submitText, fields, onLoad, onSubmit }) {
+    const root = $('#modal-root');
+    root.innerHTML = `
+        <div id="form-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 fade-in">
+            <div class="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
+                <div class="p-6 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
+                    <h3 class="text-lg font-semibold text-slate-800">${escapeHtml(title)}</h3>
+                    <button id="modal-close" class="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-md transition-colors">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+                <form id="modal-form" class="p-6 space-y-4" novalidate>
+                    ${fields.map(f => {
+                        let inputEl;
+                        if (f.type === 'textarea') {
+                            inputEl = `<textarea id="modal-field-${f.id}" name="${f.id}" rows="3" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" ${f.required ? 'required' : ''} ${f.placeholder ? `placeholder="${escapeHtml(f.placeholder)}"` : ''}></textarea>`;
+                        } else if (f.type === 'select') {
+                            const options = (f.options || []).map(opt => {
+                                const value = typeof opt === 'string' ? opt : opt.value;
+                                const label = typeof opt === 'string' ? opt : opt.label;
+                                const disabled = typeof opt === 'object' && opt.disabled ? 'disabled' : '';
+                                return `<option value="${escapeHtml(value)}" ${disabled}>${escapeHtml(label)}</option>`;
+                            }).join('');
+                            inputEl = `<select id="modal-field-${f.id}" name="${f.id}" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition bg-white" ${f.required ? 'required' : ''} ${f.disabled ? 'disabled' : ''}>${options}</select>`;
+                        } else {
+                            inputEl = `<input type="${f.type}" id="modal-field-${f.id}" name="${f.id}" class="w-full px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition" ${f.required ? 'required' : ''} ${f.placeholder ? `placeholder="${escapeHtml(f.placeholder)}"` : ''} ${f.disabled ? 'disabled' : ''}>`;
+                        }
+                        return `
+                            <div>
+                                <label class="block text-sm font-medium text-slate-700 mb-1.5">
+                                    ${escapeHtml(f.label)} ${f.required ? '<span class="text-red-500">*</span>' : ''}
+                                </label>
+                                ${inputEl}
+                                <div class="text-red-600 text-sm mt-1 hidden" id="modal-err-${f.id}"></div>
+                            </div>
+                        `;
+                    }).join('')}
+                    <div class="text-sm text-red-600 hidden" id="modal-form-error"></div>
+                </form>
+                <div class="p-6 pt-0 flex justify-end gap-3">
+                    <button type="button" id="modal-cancel" class="px-5 py-2.5 text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg font-medium transition-colors">Cancel</button>
+                    <button type="submit" form="modal-form" class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium shadow-sm transition-colors">${escapeHtml(submitText)}</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const cleanup = () => { $('#form-modal').remove(); };
+
+    $('#modal-close').addEventListener('click', cleanup);
+    $('#modal-cancel').addEventListener('click', cleanup);
+
+    if (onLoad) {
+        Promise.resolve(onLoad()).catch(err => showToast(extractErrorMessage(err), 'error'));
+    }
+
+    $('#modal-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        fields.forEach(f => {
+            const errEl = $(`#modal-err-${f.id}`);
+            if (errEl) { errEl.classList.add('hidden'); errEl.textContent = ''; }
+        });
+        $('#modal-form-error').classList.add('hidden');
+        $('#modal-form-error').textContent = '';
+
+        const values = {};
+        let hasError = false;
+        fields.forEach(f => {
+            const el = $(`#modal-field-${f.id}`);
+            values[f.id] = el ? el.value : '';
+            if (f.required && (!values[f.id] || (typeof values[f.id] === 'string' && !values[f.id].trim()))) {
+                const errEl = $(`#modal-err-${f.id}`);
+                if (errEl) { errEl.textContent = `${f.label.replace(' (optional)', '')} is required`; errEl.classList.remove('hidden'); }
+                hasError = true;
+            }
+        });
+        if (hasError) return;
+
+        try {
+            await onSubmit(values);
+            cleanup();
+        } catch (err) {
+            const safeMsg = extractErrorMessage(err);
+            $('#modal-form-error').textContent = safeMsg;
+            $('#modal-form-error').classList.remove('hidden');
+            showToast(safeMsg, 'error');
+        }
+    });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    updateHeader();
+
+    $('#btn-goto-login').addEventListener('click', () => renderLogin());
+    $('#btn-goto-register').addEventListener('click', () => renderRegister());
+    $('#btn-logout').addEventListener('click', () => {
+        clearAuth();
+        showToast('You have been logged out', 'info');
+        renderLogin();
+    });
+
+    $('#btn-reset-data').addEventListener('click', async () => {
+        if (!isAuthenticated()) { renderLogin(); return; }
+        const confirm = await showConfirmModal(
+            'Reset All Data',
+            'This will delete all trips and restore the default sample data. Are you sure?',
+            'Reset Data',
+            'bg-amber-600 hover:bg-amber-700'
+        );
+        if (!confirm) return;
+        try {
+            await apiRequest('/api/system/reset', 'POST');
+            showToast('Data reset to seed state', 'success');
+            currentTripId = null;
+            editingTripId = null;
+            renderTripsList();
+        } catch (err) {
+            showToast('Failed to reset data: ' + extractErrorMessage(err), 'error');
+        }
+    });
+
+    $('#brand-link').addEventListener('click', () => {
+        currentTripId = null;
+        editingTripId = null;
+        if (isAuthenticated()) renderTripsList();
+        else renderLogin();
+    });
+
+    if (isAuthenticated()) {
+        (async () => {
+            try {
+                await apiRequest('/api/auth/me');
+                renderTripsList();
+            } catch (err) {
+                clearAuth();
+                renderLogin();
+            }
+        })();
+    } else {
+        renderLogin();
+    }
+});
